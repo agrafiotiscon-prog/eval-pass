@@ -1,5 +1,6 @@
 ; Standard mode (default settings). Attach to NAS100/US100 and US500 charts.
 ; Load in MT5: EA properties -> Inputs -> Load.
+InpStrategy=0
 InpLookbackDays=30
 InpBandMult=2.0
 InpCheckEveryMin=30
@@ -35,6 +36,14 @@ InpTargetPct=10.0
 InpCloseOnGuard=true
 InpDayResetHour=0
 InpResetGuard=false
+InpSwBreakoutBars=240
+InpSwAtrBars=24
+InpSwStopATR=3.0
+InpSwTrailStartR=2.0
+InpSwTrailDistR=2.0
+InpSwEntryStartUTC=7
+InpSwEntryEndUTC=20
+InpSwFlatFriday=true
 InpSessionTZ=0
 InpSprintMode=false
 InpSprintMaxRiskPct=4.0

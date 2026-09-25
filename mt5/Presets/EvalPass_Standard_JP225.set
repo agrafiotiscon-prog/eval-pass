@@ -1,4 +1,4 @@
-; SPRINT mode for a JP225 chart (Tokyo session). Use together with the US sprint charts.
+; STANDARD mode for a JP225 chart (Tokyo session), 0.75% risk.
 ; Load in MT5: EA properties -> Inputs -> Load.
 InpStrategy=0
 InpLookbackDays=30
@@ -30,9 +30,9 @@ InpMaxLots=0.0
 InpMaxSpreadPoints=0.0
 InpSlippagePoints=50
 InpChallengeBalance=0.0
-InpDailyStopPct=4.5
+InpDailyStopPct=3.0
 InpMaxLossStopPct=8.0
-InpTargetPct=10.2
+InpTargetPct=10.0
 InpCloseOnGuard=true
 InpDayResetHour=0
 InpResetGuard=false
@@ -45,13 +45,13 @@ InpSwEntryStartUTC=7
 InpSwEntryEndUTC=20
 InpSwFlatFriday=true
 InpSessionTZ=1
-InpSprintMode=true
+InpSprintMode=false
 InpSprintMaxRiskPct=4.0
 InpSprintMinRiskPct=0.25
 InpSprintWinR=2.5
 InpSprintDailyBudget=4.0
 InpSprintTotalBudget=9.5
-InpMinTradingDays=4
+InpMinTradingDays=0
 InpHelperHHMM=935
 InpMagic=26092501
 InpComment=EvalPass

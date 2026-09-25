@@ -12,10 +12,16 @@
 //|  noise width, a fixed R target, break-even, flat before 16:00 NY. |
 //+------------------------------------------------------------------+
 #property copyright   "eval-pass"
-#property version     "1.20"
-#property description "NY-session intraday momentum for NAS100 / US500 with prop-firm guard"
+#property version     "1.30"
+#property description "Index intraday momentum (NDX100/SPX500/JP225) + gold swing trend, with prop-firm guard"
 
 #include <Trade/Trade.mqh>
+
+enum ENUM_STRATEGY
+  {
+   STRAT_MOMENTUM = 0,  // Momentum: intraday noise-area breakout (NDX100, SPX500, JP225)
+   STRAT_SWING    = 1   // Swing trend: multi-day H1 breakout (gold / XAUUSD)
+  };
 
 enum ENUM_STOP_MODE
   {
@@ -42,6 +48,9 @@ enum ENUM_DST_MODE
    DST_US   = 1,     // US rules (typical GMT+2/+3 "New York close" brokers)
    DST_EU   = 2      // EU rules
   };
+
+input group "=== Strategy type ==="
+input ENUM_STRATEGY  InpStrategy        = STRAT_MOMENTUM; // Momentum for indices, Swing for gold
 
 //--- strategy
 input group "=== Strategy (noise-area momentum) ==="
@@ -92,6 +101,16 @@ input double         InpTargetPct        = 10.0;      // Halt once profit target
 input bool           InpCloseOnGuard     = true;      // Close open trades when a guard triggers
 input int            InpDayResetHour     = 0;         // Server hour when the prop "day" resets
 input bool           InpResetGuard       = false;     // Clear saved guard state on start (new challenge)
+
+input group "=== Swing trend settings (gold) ==="
+input int            InpSwBreakoutBars   = 240;       // H1 bars for the breakout high/low (240 = ~10 days)
+input int            InpSwAtrBars        = 24;        // H1 bars for the average range (ATR)
+input double         InpSwStopATR        = 3.0;       // Stop-loss = this many ATR
+input double         InpSwTrailStartR    = 2.0;       // Start trailing at this profit in R (0 = off)
+input double         InpSwTrailDistR     = 2.0;       // Trail this many R behind the best price
+input int            InpSwEntryStartUTC  = 7;         // Entries allowed from this UTC hour
+input int            InpSwEntryEndUTC    = 20;        // ... until this UTC hour
+input bool           InpSwFlatFriday     = true;      // Close before the weekend (Friday 20:30 UTC)
 
 input group "=== Session clock ==="
 input ENUM_SESSION_TZ InpSessionTZ       = TZ_NEW_YORK; // Time zone of the session inputs above
@@ -589,19 +608,20 @@ bool OpenTradeLocked(const int dir, const double stopDist)
    if(tick <= 0) tick = _Point;
    double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double dist = MathMax(stopDist, minDist + tick);
+   double tpR  = (InpStrategy == STRAT_SWING) ? 0.0 : InpTakeProfitR;   // swing exits by trailing stop only
    bool ok = false;
    if(dir > 0)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double sl  = NormalizeDouble(MathRound((ask - dist) / tick) * tick, _Digits);
-      double tp  = (InpTakeProfitR > 0) ? NormalizeDouble(MathRound((ask + InpTakeProfitR * dist) / tick) * tick, _Digits) : 0.0;
+      double tp  = (tpR > 0) ? NormalizeDouble(MathRound((ask + tpR * dist) / tick) * tick, _Digits) : 0.0;
       ok = g_trade.Buy(lots, _Symbol, 0.0, sl, tp, InpComment);
      }
    else
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double sl  = NormalizeDouble(MathRound((bid + dist) / tick) * tick, _Digits);
-      double tp  = (InpTakeProfitR > 0) ? NormalizeDouble(MathRound((bid - InpTakeProfitR * dist) / tick) * tick, _Digits) : 0.0;
+      double tp  = (tpR > 0) ? NormalizeDouble(MathRound((bid - tpR * dist) / tick) * tick, _Digits) : 0.0;
       ok = g_trade.Sell(lots, _Symbol, 0.0, sl, tp, InpComment);
      }
    if(!ok || (g_trade.ResultRetcode() != TRADE_RETCODE_DONE && g_trade.ResultRetcode() != TRADE_RETCODE_PLACED))
@@ -846,6 +866,143 @@ void OnNewBar(const bool entriesAllowed)
   }
 
 //+------------------------------------------------------------------+
+//| Swing trend mode (gold)                                           |
+//| Every H1 bar: breakout levels = highest high / lowest low of the  |
+//| last InpSwBreakoutBars closed bars. A trade opens when price      |
+//| crosses a level during the next hour (virtual stop order). Stop = |
+//| InpSwStopATR x ATR(InpSwAtrBars); trailing stop from +start R;    |
+//| max one entry per trading day; flat before the weekend.           |
+//+------------------------------------------------------------------+
+datetime g_lastH1   = 0;
+double   g_swBuyLvl = 0.0;
+double   g_swSellLvl = 0.0;
+double   g_swDist   = 0.0;
+
+int UtcMinuteAndDow(const datetime serverTime, int &dow)
+  {
+   MqlDateTime u;
+   TimeToStruct(ServerToUTC(serverTime), u);
+   dow = u.day_of_week;
+   return u.hour * 60 + u.min;
+  }
+
+// server time of the latest 17:00 New York (start of the current trading day)
+datetime TradingDayStartServer()
+  {
+   long nySec = ((long)ServerToNY(TimeCurrent())) % 86400;
+   long since = nySec - 17 * 3600;
+   if(since < 0) since += 86400;
+   return TimeCurrent() - (datetime)since;
+  }
+
+void SwingOnNewBar(const bool entriesAllowed)
+  {
+   g_swBuyLvl = 0.0;
+   g_swSellLvl = 0.0;
+   ulong t;
+   if(MyPosition(t) != 0 || !entriesAllowed) return;
+   int need = MathMax(InpSwBreakoutBars, InpSwAtrBars + 1) + 1;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, PERIOD_H1, 1, need, r) < need)
+     {
+      g_status = "Swing: waiting for enough H1 history";
+      return;
+     }
+   int dow;
+   int umin = UtcMinuteAndDow(r[0].time, dow);        // the bar that just closed
+   bool window = (umin >= InpSwEntryStartUTC * 60 && umin < InpSwEntryEndUTC * 60) &&
+                 ((dow >= 1 && dow <= 4) || (dow == 5 && umin < 990));
+   if(!window) { g_status = "Swing: outside entry hours"; return; }
+   g_tradesToday = CountEntriesSince(TradingDayStartServer());
+   if(g_tradesToday >= 1) { g_status = "Swing: already traded today"; return; }
+   double hh = -DBL_MAX, ll = DBL_MAX, sum = 0.0;
+   for(int k = 0; k < InpSwBreakoutBars; k++)
+     {
+      if(r[k].high > hh) hh = r[k].high;
+      if(r[k].low < ll)  ll = r[k].low;
+     }
+   for(int k = 0; k < InpSwAtrBars; k++)
+     {
+      double pc = r[k + 1].close;
+      sum += MathMax(r[k].high - r[k].low, MathMax(MathAbs(r[k].high - pc), MathAbs(r[k].low - pc)));
+     }
+   g_swDist = InpSwStopATR * sum / InpSwAtrBars;
+   double spr = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(InpAllowLong)  g_swBuyLvl  = hh + spr;          // triggers when Bid reaches the high
+   if(InpAllowShort) g_swSellLvl = ll;
+   g_status = StringFormat("Swing: buy above %.2f | sell below %.2f | stop %.2f", g_swBuyLvl, g_swSellLvl, g_swDist);
+  }
+
+void SwingEntries()
+  {
+   if(g_swDist <= 0 || (g_swBuyLvl <= 0 && g_swSellLvl <= 0)) return;
+   ulong t;
+   if(MyPosition(t) != 0) { g_swBuyLvl = 0.0; g_swSellLvl = 0.0; return; }
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int dir = 0;
+   if(g_swBuyLvl > 0 && ask >= g_swBuyLvl) dir = 1;
+   else if(g_swSellLvl > 0 && bid <= g_swSellLvl) dir = -1;
+   if(dir == 0) return;
+   g_swBuyLvl = 0.0;                                  // one shot per hour (OCO)
+   g_swSellLvl = 0.0;
+   if(OpenTrade(dir, g_swDist)) g_tradesToday++;
+  }
+
+void SwingTrail()
+  {
+   if(InpSwTrailStartR <= 0) return;
+   double stopsLvl = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || t == g_helperTicket) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      string kr = GVName(StringFormat("R_%I64u", t));
+      string kb = GVName(StringFormat("B_%I64u", t));
+      if(!GlobalVariableCheck(kr)) continue;
+      double risk  = GlobalVariableGet(kr);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double tp    = PositionGetDouble(POSITION_TP);
+      bool   buy   = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double fav   = buy ? bid - entry : entry - ask;
+      double best  = GlobalVariableCheck(kb) ? GlobalVariableGet(kb) : 0.0;
+      if(fav > best) { best = fav; GlobalVariableSet(kb, best); }
+      if(risk <= 0 || best < InpSwTrailStartR * risk) continue;
+      double nsl = NormalizeDouble(buy ? entry + best - InpSwTrailDistR * risk : entry - best + InpSwTrailDistR * risk, _Digits);
+      bool better = buy ? (nsl > sl + _Point && nsl < bid - stopsLvl) : ((sl == 0 || nsl < sl - _Point) && nsl > ask + stopsLvl);
+      if(better && !g_trade.PositionModify(t, nsl, tp))
+         PrintFormat("Trailing modify failed: %d %s", g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+     }
+  }
+
+void SwingTick(const bool entriesAllowed)
+  {
+   int dow;
+   int umin = UtcMinuteAndDow(TimeCurrent(), dow);
+   ulong t;
+   if(InpSwFlatFriday && ((dow == 5 && umin >= 1230) || dow == 6 || dow == 0))
+     {
+      g_swBuyLvl = 0.0; g_swSellLvl = 0.0;
+      if(MyPosition(t) != 0 && t != g_helperTicket) CloseMine("weekend flat");
+      return;
+     }
+   SwingTrail();
+   datetime h1 = iTime(_Symbol, PERIOD_H1, 0);
+   if(h1 != 0 && h1 != g_lastH1)
+     {
+      g_lastH1 = h1;
+      SwingOnNewBar(entriesAllowed && !g_haltAll);
+     }
+   if(entriesAllowed && !g_haltAll) SwingEntries();
+  }
+
+//+------------------------------------------------------------------+
 int OnInit()
   {
    if(InpCheckEveryMin <= 0 || InpLookbackDays <= 0 || InpRiskPercent <= 0)
@@ -891,29 +1048,34 @@ void OnTick()
   {
    bool entriesAllowed = GuardCheck();
    MinDaysHelper();
-
-   // hard flat before the close
    datetime nyNow = ServerToSession(TimeCurrent());
-   int clkNow = MinOfDay(nyNow);
-   ulong ticket;
-   if(MyPosition(ticket) != 0 && ticket != g_helperTicket && (clkNow >= g_flatMin || clkNow < g_openMin))
-      CloseMine("session flat");
 
-   ManagePartial();
-   ManageBreakEven();
-
-   datetime bt = iTime(_Symbol, PERIOD_M1, 0);
-   if(bt != 0 && bt != g_lastBarTime)
+   if(InpStrategy == STRAT_SWING)
+      SwingTick(entriesAllowed);
+   else
      {
-      g_lastBarTime = bt;
-      OnNewBar(entriesAllowed && !g_haltAll);
+      // hard flat before the close
+      int clkNow = MinOfDay(nyNow);
+      ulong ticket;
+      if(MyPosition(ticket) != 0 && ticket != g_helperTicket && (clkNow >= g_flatMin || clkNow < g_openMin))
+         CloseMine("session flat");
+
+      ManagePartial();
+      ManageBreakEven();
+
+      datetime bt = iTime(_Symbol, PERIOD_M1, 0);
+      if(bt != 0 && bt != g_lastBarTime)
+        {
+         g_lastBarTime = bt;
+         OnNewBar(entriesAllowed && !g_haltAll);
+        }
      }
 
    if(InpShowPanel && !MQLInfoInteger(MQL_OPTIMIZATION))
      {
       double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-      Comment(StringFormat("EvalPassMomentum%s  |  %s time %s\n%s\nTrades today %d/%d  |  Equity %.2f  (%.2f%% vs initial, %.2f%% today)\n%s",
-                           InpSprintMode ? " [SPRINT]" : "", SessionName(), TimeToString(nyNow, TIME_DATE | TIME_MINUTES), g_status, g_tradesToday, InpMaxTradesPerDay,
+      Comment(StringFormat("EvalPass %s%s  |  %s time %s\n%s\nTrades today %d/%d  |  Equity %.2f  (%.2f%% vs initial, %.2f%% today)\n%s",
+                           InpStrategy == STRAT_SWING ? "Swing" : "Momentum", InpSprintMode ? " [SPRINT]" : "", SessionName(), TimeToString(nyNow, TIME_DATE | TIME_MINUTES), g_status, g_tradesToday, InpMaxTradesPerDay,
                            eq, 100.0 * (eq / g_initBalance - 1.0), 100.0 * (eq - g_dayStartEq) / g_initBalance,
                            g_haltAll ? "HALTED (target reached or max-loss guard)" : (g_haltDay ? "Daily stop active - no new trades today" : "Active")));
      }

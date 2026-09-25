@@ -1,6 +1,6 @@
-; SPRINT mode for a JP225 chart (Tokyo session). Use together with the US sprint charts.
+; GOLD SWING in SPRINT sizing (XAUUSD chart). Much higher risk per trade - see README.
 ; Load in MT5: EA properties -> Inputs -> Load.
-InpStrategy=0
+InpStrategy=1
 InpLookbackDays=30
 InpBandMult=2.0
 InpCheckEveryMin=30
@@ -17,11 +17,11 @@ InpPartialFrac=0.5
 InpMaxTradesPerDay=3
 InpAllowLong=true
 InpAllowShort=true
-InpOpenHHMM=900
-InpCloseHHMM=1500
-InpFirstCheckHHMM=930
-InpLastEntryHHMM=1430
-InpFlatHHMM=1455
+InpOpenHHMM=930
+InpCloseHHMM=1600
+InpFirstCheckHHMM=1000
+InpLastEntryHHMM=1530
+InpFlatHHMM=1555
 InpAutoGMTOffset=true
 InpServerGMTWinter=2
 InpServerDST=1
@@ -44,7 +44,7 @@ InpSwTrailDistR=2.0
 InpSwEntryStartUTC=7
 InpSwEntryEndUTC=20
 InpSwFlatFriday=true
-InpSessionTZ=1
+InpSessionTZ=0
 InpSprintMode=true
 InpSprintMaxRiskPct=4.0
 InpSprintMinRiskPct=0.25
@@ -52,7 +52,7 @@ InpSprintWinR=2.5
 InpSprintDailyBudget=4.0
 InpSprintTotalBudget=9.5
 InpMinTradingDays=4
-InpHelperHHMM=935
+InpHelperHHMM=1005
 InpMagic=26092501
 InpComment=EvalPass
 InpShowPanel=true

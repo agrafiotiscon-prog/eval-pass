@@ -13,9 +13,14 @@ import polars as pl
 
 
 def convert(zip_path: str, out_path: str, tmp_dir: str, every: str = "1m") -> None:
-    csv_name = subprocess.run(["unzip", "-Z1", zip_path], capture_output=True, text=True, check=True).stdout.split()[0]
-    subprocess.run(["unzip", "-o", "-q", zip_path, csv_name, "-d", tmp_dir], check=True)
-    csv_path = os.path.join(tmp_dir, csv_name)
+    if zip_path.endswith(".gz"):
+        csv_path = os.path.join(tmp_dir, os.path.basename(zip_path)[:-3])
+        with open(csv_path, "wb") as fo:
+            subprocess.run(["gzip", "-dc", zip_path], stdout=fo, check=True)
+    else:
+        csv_name = subprocess.run(["unzip", "-Z1", zip_path], capture_output=True, text=True, check=True).stdout.split()[0]
+        subprocess.run(["unzip", "-o", "-q", zip_path, csv_name, "-d", tmp_dir], check=True)
+        csv_path = os.path.join(tmp_dir, csv_name)
     try:
         df = pl.read_csv(
             csv_path,
@@ -47,9 +52,9 @@ def main() -> None:
     tmp_dir = os.path.join(out_dir, "_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     for name in sorted(os.listdir(zip_dir)):
-        if not name.endswith(".zip"):
+        if not (name.endswith(".zip") or name.endswith(".csv.gz")):
             continue
-        out_path = os.path.join(out_dir, name.replace("ticks-", "").replace(".zip", ".parquet"))
+        out_path = os.path.join(out_dir, name.replace("ticks-", "").replace(".zip", ".parquet").replace(".csv.gz", ".parquet"))
         if os.path.exists(out_path):
             continue
         convert(os.path.join(zip_dir, name), out_path, tmp_dir, every)

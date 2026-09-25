@@ -32,3 +32,16 @@ python3 "$HERE/oanda_prep.py" "$O/NAS100_USD" NAS100O "$D/m1o" 1.0
 python3 "$HERE/oanda_prep.py" "$O/SPX500_USD" SPX500O "$D/m1o" 1.0
 python3 "$HERE/oanda_prep.py" "$O/US2000_USD" US2000O "$D/m1o" 1.0     # sprint-mode markets
 python3 "$HERE/oanda_prep.py" "$O/JP225_USD" JP225O "$D/m1o" 1.0
+
+# per-market research (wf.py): Dukascopy M1 2012-2026 for gold and FX, OANDA gold 2006-2019
+for spec in "USA-100-Technical-Index:USATECHIDXUSD" "xauusd:XAUUSD" "eurusd:EURUSD" "gbpusd:GBPUSD" "usdjpy:USDJPY"; do
+  repo=${spec%%:*}; sym=${spec##*:}
+  mkdir -p "$D/dl"
+  for y in 2012 2013 2014 2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025 2026; do
+    [ -f "$D/m1/$sym-$y.parquet" ] && continue
+    curl -sSfL --retry 4 -o "$D/dl/ticks-$sym-$y.zip" "https://github.com/esmaeil999/$repo/releases/download/ticks-$sym-$y/ticks-$sym-$y.zip" || continue
+    python3 "$HERE/data_prep.py" "$D/dl" "$D/m1" 1m && rm -f "$D/dl/ticks-$sym-$y.zip"
+  done
+done
+(cd "$D/financial-data" && git sparse-checkout add 'pyfinancialdata/data/currencies/oanda/XAU_USD/' && git checkout -q HEAD)
+python3 "$HERE/oanda_prep.py" "$O/XAU_USD" XAU_O "$D/m1o" 2.0

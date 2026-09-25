@@ -327,3 +327,37 @@ def gap_fade(mkt: Market, min_gap=0.001, max_gap=0.006, sl_mult=1.0, exit_min=66
     it.tp[:] = dist
     it.ex[(clk >= exit_min) | (clk < 570)] = 2
     return it
+
+
+def swing_breakout(mkt: Market, n=100, atr_n=24, sl_atr=2.5, trend_n=0, entry_utc=(420, 1200),
+                   flat_friday_utc=1230, long_only=False, tp_r=0.0) -> Intents:
+    """Multi-day trend following on the signal grid (e.g. H1): stop orders at the n-bar high/low.
+
+    Entries only inside the liquid UTC window; everything is closed on Friday at flat_friday_utc
+    (no weekend risk). Stops: sl_atr x ATR(atr_n); trailing/TP handled by the engine.
+    """
+    s = mkt.sig
+    it = Intents(len(s))
+    hh = pd.Series(s.bh.values).rolling(n, min_periods=n).max().values
+    ll = pd.Series(s.bl.values).rolling(n, min_periods=n).min().values
+    atr = atr_bars(s, atr_n)
+    spr = (s.ac - s.bc).values
+    c = s.bc.values
+    utc = s.utc_min.values
+    dow = pd.DatetimeIndex(s.time).dayofweek.values
+    ok = (utc >= entry_utc[0]) & (utc < entry_utc[1]) & np.isfinite(hh) & np.isfinite(atr) & ((dow < 4) | ((dow == 4) & (utc < flat_friday_utc - 240)))
+    want_l = ok.copy(); want_s = ok.copy() & (not long_only)
+    if trend_n:
+        tma = pd.Series(c).rolling(trend_n, min_periods=trend_n).mean().values
+        want_l &= c > tma
+        want_s &= c < tma
+    it.ent[want_l & want_s] = 3
+    it.ent[want_l & ~want_s] = 2
+    it.ent[want_s & ~want_l] = -2
+    it.lvl_buy[:] = hh + spr
+    it.lvl_sell[:] = ll
+    it.sl[:] = sl_atr * atr
+    it.tp[:] = tp_r * sl_atr * atr if tp_r > 0 else 0.0
+    it.ex[(dow == 4) & (utc >= flat_friday_utc)] = 2
+    it.ex[dow >= 5] = 2
+    return it

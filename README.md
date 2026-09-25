@@ -20,6 +20,7 @@ research code is in `research/`.
 | Robustness | 384 of 384 parameter combinations were profitable on all three independent datasets |
 | Prop simulation (NAS100 + US500, 0.75 % risk per trade, 2005-2019) | +10 % target: 88 % pass, 6 % fail, median 113 days. +8 %: 90 % pass, median 80 days. Phase 2 (+5 %): 93 % pass, median 46 days |
 | Honest caveats | 2026 (Jan-Aug, never used to choose anything) was **flat** (0.0R over 39 trades). The edge is sensitive to execution cost (see below). |
+| Per-market strategies (v1.30) | Indices trade **momentum**; **gold (XAUUSD) trades multi-day swing trend** (`InpStrategy = Swing`). Gold's daily correlation with index momentum is 0.00. With 2025-26 start dates at 1 % risk, NDX100 + gold passes about 81 % of the time vs about 2 % for NDX100 alone. |
 | Want it in about a week? | Optional **Sprint mode** (off by default): about 1 in 4 attempts pass within 7 days, median 15-20 days to funded if restarts are free, and about 1 in 3 attempts is halted at -8 %. See [Sprint mode](#sprint-mode-trying-to-pass-in-about-a-week-opt-in). |
 
 ![equity](research/results/equity.png)
@@ -279,6 +280,40 @@ NDX100, SPX500, DJI30, GER40 and JP225 (cash-session hours only) to `MQL5/Files`
 `research/broker_prep.py` turns those files into backtest input, so other indices can be checked on
 2021-2026 data.
 
+## Per-market strategies: index momentum + gold swing (v1.30)
+
+Every market was tested separately against a library of strategy families: intraday momentum,
+opening-range breakout, 15-minute breakouts, mean reversion and multi-day swing trend. The test was
+a strict walk-forward: every 6 months the best setting was chosen on the previous 3 years only, then
+traded blind for the next 6 months. Full tables are in
+[`research/results/portfolio.md`](research/results/portfolio.md).
+
+| market | strategy that survived | evidence |
+|---|---|---|
+| NDX100, SPX500, JP225 | intraday momentum (unchanged) | 2005-2026; re-optimising every 6 months did **not** beat the fixed settings |
+| **XAUUSD (gold)** | **swing trend**: breakout of the 240-bar H1 high/low, stop 3 x ATR(24), trailing 2R behind the best price after +2R, long **and** short, max 1 entry/day, flat Friday 20:30 UTC | profitable with all 48 nearby settings on OANDA 2006-19 (including the 2011-15 bear market) **and** Dukascopy 2012-26; +32R in 2025-26; blind walk-forward Sharpe 1.98 |
+| EURUSD, GBPUSD | none | every family about zero in the blind periods |
+| USDJPY | none | long-only trend looked great until 2024 (the 12-year uptrend), then 97 % of settings lost in 2025-26 |
+| XAGUSD, BTCUSD | none | the gold swing settings lose money (wider spreads, weekend gaps for crypto) |
+
+Combined results (one challenge attempt: +10 % target, 5 % daily, 10 % max, EA halt at -8 %):
+
+| markets | start dates | risk per trade | pass <= 120 days | pass eventually | halted | median days |
+|---|---|---|---|---|---|---|
+| NDX100 momentum | 2025-26 | 1.0 % | 0 % | 2 % | 1 % | - |
+| **NDX100 + gold swing** | 2025-26 | 1.0 % | **52 %** | **81 %** | 3 % | **101** |
+| NDX100 + gold swing | 2025-26 | 0.75 % | 18 % | 79 % | 0 % | 165 |
+| NDX100 + gold swing | 2020-26 | 0.75 % | 27 % | 90 % | 3 % | 189 |
+| 3 indices + gold swing | 2010-19 | 0.75 % | 67 % | 83 % | 10 % | 65 |
+
+Gold swing positions stay open overnight, typically about 3 nights. The results subtract an
+estimated 0.022R per night of swap. Check your broker's gold swap rates.
+
+**Set-up:** add an **XAUUSD** chart (any timeframe) with `EvalPass_Gold_Swing.set`, or
+`EvalPass_Gold_Swing_Sprint.set` in Sprint mode. Use the **same magic number** as the index charts
+so the account guard is shared. Index charts are unchanged; for JP225 at 0.75 % use
+`EvalPass_Standard_JP225.set`.
+
 ## Prop-firm notes
 
 * **Minimum trading days.** The EA halts as soon as the target is hit. If your firm needs a minimum
@@ -307,6 +342,8 @@ python sprint_report.py          # results/sprint.md
 | `research/strategies.py` | strategy generators (noise-area momentum, ORB, mean reversion, breakout) |
 | `research/ea_replica.py` | independent bar-by-bar copy of the EA logic, used to cross-check the backtest |
 | `research/prop.py` | prop-challenge and account-curve simulation |
+| `research/wf.py`, `research/wf_report.py`, `research/fam_summary.py` | strategy library, walk-forward selection, per-family robustness |
+| `research/portfolio_report.py` | per-market results + portfolio challenge simulation (`results/portfolio.md`) |
 | `research/sprint.py`, `research/sprint_report.py` | Sprint-mode simulation (risk budget, halt and restart) |
 | `research/scan_mr.py`, `research/scan_bo.py` | scalping scans that did not survive |
 

@@ -98,3 +98,34 @@ def replica_intents(mkt: Market, lookback=30, band_mult=1.5, check_every=30, use
     clk_all = ny_min
     it.ex[(clk_all >= flat_min) | (clk_all < open_min)] = 2
     return it
+
+
+def replica_swing(mkt: Market, n=240, atr_n=24, sl_atr=3.0, start_utc=7, end_utc=20, allow_long=True, allow_short=True):
+    """Bar-by-bar copy of SwingOnNewBar()/SwingEntries() (levels valid for the following hour)."""
+    s = mkt.sig
+    it = Intents(len(s))
+    t = pd.DatetimeIndex(s.time)
+    umin = (t.hour * 60 + t.minute).values
+    dow_mql = ((t.dayofweek.values + 1) % 7)          # MQL: Sunday=0 ... Saturday=6
+    h, l, c = s.bh.values, s.bl.values, s.bc.values
+    spr = (s.ac - s.bc).values
+    for j in range(max(n, atr_n + 1), len(s)):
+        dow = dow_mql[j]
+        window = (umin[j] >= start_utc * 60 and umin[j] < end_utc * 60) and ((1 <= dow <= 4) or (dow == 5 and umin[j] < 990))
+        if not window:
+            continue
+        hh = h[j - n + 1: j + 1].max()
+        ll = l[j - n + 1: j + 1].min()
+        tr = 0.0
+        for k in range(atr_n):
+            q = j - k
+            pc = c[q - 1]
+            tr += max(h[q] - l[q], abs(h[q] - pc), abs(l[q] - pc))
+        dist = sl_atr * tr / atr_n
+        it.lvl_buy[j] = hh + spr[j] if allow_long else np.nan
+        it.lvl_sell[j] = ll if allow_short else np.nan
+        it.ent[j] = 3 if (allow_long and allow_short) else (2 if allow_long else -2)
+        it.sl[j] = dist
+    t_ex = umin
+    it.ex[((dow_mql == 5) & (t_ex >= 1230)) | (dow_mql == 6) | (dow_mql == 0)] = 2
+    return it
