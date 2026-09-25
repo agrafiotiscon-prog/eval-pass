@@ -251,6 +251,34 @@ the standard mode above is unchanged.
 | `InpMinTradingDays` | 4 | minimum-days helper after the target (0 = off) |
 | `InpHelperHHMM` | 1005 / 935 | session time of the helper's micro trade |
 
+## 2025-26 regime check and Smooth mode (optional)
+
+The strategy was flat from January to August 2026 (0.0R over 39 Nasdaq trades). A diagnosis on the
+real tick data showed fewer strong trend days (32 % of days vs 37-46 % in 2020-24). Breakouts still
+reach +1R about as often as before (51 % of trades), but only about half as many continue to the
+2.5R target.
+
+Fixes tested. A fix was only accepted if it worked on 2005-2024 as well as on 2025-26:
+
+| idea | 2025-26 | 2005-2024 | verdict |
+|---|---|---|---|
+| Trade only when recent days were trendy | much better | weaker on Russell, Japan and several settings | rejected (a bet on 2026 continuing) |
+| Short only below the 50/200-day average | better | mixed, fewer trades, less total profit | rejected |
+| Fade failed breakouts | loses | loses | rejected |
+| Fade the opening gap | about zero | about zero | rejected |
+| **Close half at +1R (partial take-profit)** | Sharpe 0.65 to 2.31, and 2026 turns slightly positive | about unchanged (Nasdaq 1.98 to 1.96, S&P 2.26 to 2.38, Japan 1.68 to 1.83) | **accepted as an option** |
+
+The partial take-profit makes the account steadier: lower drawdowns, and profitable in 7 of 7 years
+from 2020 to 2026. It does **not** pass challenges faster, because winners are smaller. In the
+simulation at 0.5 % risk the pass rate stays about 93 %, halts drop from 3 % to 1 %, and the median
+time to pass rises from 129 to 171 days. Use it via `EvalPass_Smooth.set` (NDX100/SPX500) and
+`EvalPass_Smooth_JP225.set`. The new inputs are `InpPartialR` (0 = off) and `InpPartialFrac`.
+
+**Broker data export.** `mt5/Scripts/ExportSessionBars.mq5` writes your broker's M1 history for
+NDX100, SPX500, DJI30, GER40 and JP225 (cash-session hours only) to `MQL5/Files`.
+`research/broker_prep.py` turns those files into backtest input, so other indices can be checked on
+2021-2026 data.
+
 ## Prop-firm notes
 
 * **Minimum trading days.** The EA halts as soon as the target is hit. If your firm needs a minimum

@@ -277,3 +277,53 @@ def half_hour_momentum(mkt: Market, sl_frac=1.0, entry_min=930, flat_min=959, mi
     it.sl[:] = sl_frac * rf
     it.ex[(clk >= flat_min) | (clk < 570)] = 2
     return it
+
+
+def failed_breakout(mkt: Market, lookback=30, vol_mult=1.5, check_every=30, first_check=630, last_entry=900,
+                    flat_min=955, back_to="open", sl_sigma=1.0, tp_r=2.0) -> Intents:
+    """Fade a noise-band breakout that has failed.
+
+    Earlier today price closed outside the band at a check; now (at a later check) it has come all the
+    way back to the reference level (session open / band edge). Trade toward the opposite side.
+    """
+    p = noise_prep(mkt, lookback)
+    s = mkt.sig
+    it = Intents(len(s))
+    clk, rth, o, pc, c = p["clk"], p["rth"], p["o"], p["pc"], p["c"]
+    sig = p["sigma"] * vol_mult
+    ub = np.fmax(o, pc) * (1 + sig)
+    lb = np.fmin(o, pc) * (1 - sig)
+    check = rth & (((clk + 1) % check_every) == 0) & (clk + 1 >= 600)
+    date = s.ny_date.values
+    up_brk = pd.Series(np.where(check, c > ub, False)).groupby(date).cummax().values
+    dn_brk = pd.Series(np.where(check, c < lb, False)).groupby(date).cummax().values
+    ok = check & (clk + 1 >= first_check) & (clk + 1 <= last_entry) & np.isfinite(sig)
+    ref_hi = np.fmax(o, pc) if back_to == "band" else o
+    ref_lo = np.fmin(o, pc) if back_to == "band" else o
+    go_s = ok & up_brk & ~dn_brk & (c < ref_hi)
+    go_l = ok & dn_brk & ~up_brk & (c > ref_lo)
+    it.ent[go_s] = -1
+    it.ent[go_l] = 1
+    sl = sl_sigma * p["sigma"] * o
+    it.sl[:] = sl
+    it.tp[:] = tp_r * sl
+    it.ex[(clk >= flat_min) | (clk < 570)] = 2
+    return it
+
+
+def gap_fade(mkt: Market, min_gap=0.001, max_gap=0.006, sl_mult=1.0, exit_min=660, entry_min=575) -> Intents:
+    """Fade the overnight gap at the cash open toward the previous close (target = previous close)."""
+    p = noise_prep(mkt, 30)
+    s = mkt.sig
+    it = Intents(len(s))
+    clk, o, pc, c = p["clk"], p["o"], p["pc"], p["c"]
+    gap = o / pc - 1
+    sig_bar = clk == entry_min - 1
+    ok = sig_bar & np.isfinite(gap) & (np.abs(gap) >= min_gap) & (np.abs(gap) <= max_gap)
+    dist = np.abs(c - pc)
+    it.ent[ok & (gap > 0) & (c > pc)] = -1
+    it.ent[ok & (gap < 0) & (c < pc)] = 1
+    it.sl[:] = np.maximum(sl_mult * np.abs(o - pc), 1e-9)
+    it.tp[:] = dist
+    it.ex[(clk >= exit_min) | (clk < 570)] = 2
+    return it

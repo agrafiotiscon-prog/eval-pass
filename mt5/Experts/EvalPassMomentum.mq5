@@ -12,7 +12,7 @@
 //|  noise width, a fixed R target, break-even, flat before 16:00 NY. |
 //+------------------------------------------------------------------+
 #property copyright   "eval-pass"
-#property version     "1.10"
+#property version     "1.20"
 #property description "NY-session intraday momentum for NAS100 / US500 with prop-firm guard"
 
 #include <Trade/Trade.mqh>
@@ -56,6 +56,8 @@ input double         InpMinStopSigma    = 0.25;       // Minimum stop in noise w
 input double         InpTakeProfitR     = 2.5;        // Take profit in R (0 = none)
 input double         InpBETriggerR      = 1.5;        // Move stop to break-even at this R (0 = off)
 input double         InpBEOffsetR       = 0.1;        // Break-even stop offset in R
+input double         InpPartialR        = 0.0;        // Close part of the trade at this R (0 = off)
+input double         InpPartialFrac     = 0.5;        // Fraction closed at InpPartialR
 input int            InpMaxTradesPerDay = 3;          // Max entries per New York day
 input bool           InpAllowLong       = true;       // Allow long trades
 input bool           InpAllowShort      = true;       // Allow short trades
@@ -608,6 +610,9 @@ bool OpenTradeLocked(const int dir, const double stopDist)
       return false;
      }
    PrintFormat("%s %.2f lots, stop distance %.2f", dir > 0 ? "BUY" : "SELL", lots, dist);
+   ulong pt;
+   if(MyPosition(pt) != 0)
+      GlobalVariableSet(GVName(StringFormat("R_%I64u", pt)), dist);
    return true;
   }
 
@@ -621,6 +626,40 @@ bool OpenTrade(const int dir, const double stopDist)
    bool done = OpenTradeLocked(dir, stopDist);
    ReleaseEntryLock();
    return done;
+  }
+
+//+------------------------------------------------------------------+
+//| Partial take-profit: close InpPartialFrac of a position once it   |
+//| has moved InpPartialR x its initial risk in favour (once only).   |
+//+------------------------------------------------------------------+
+void ManagePartial()
+  {
+   if(InpPartialR <= 0 || InpPartialFrac <= 0) return;
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || t == g_helperTicket) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      string kd = GVName(StringFormat("P_%I64u", t));
+      string kr = GVName(StringFormat("R_%I64u", t));
+      if(GlobalVariableCheck(kd) || !GlobalVariableCheck(kr)) continue;
+      double risk  = GlobalVariableGet(kr);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double vol   = PositionGetDouble(POSITION_VOLUME);
+      bool   buy   = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double move  = buy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) - entry : entry - SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      if(risk <= 0 || move < InpPartialR * risk) continue;
+      double part = MathFloor(vol * InpPartialFrac / step) * step;
+      GlobalVariableSet(kd, 1);                       // never retry, even if the volume is too small
+      if(part < vmin || vol - part < vmin) continue;
+      if(!g_trade.PositionClosePartial(t, NormalizeDouble(part, 8)))
+         PrintFormat("Partial close failed: %d %s", g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+      else
+         PrintFormat("Partial take-profit: closed %.2f of %.2f lots at +%.1fR", part, vol, InpPartialR);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -641,10 +680,13 @@ void ManageBreakEven()
       double sl    = PositionGetDouble(POSITION_SL);
       double tp    = PositionGetDouble(POSITION_TP);
       if(sl <= 0) continue;
+      string kr = GVName(StringFormat("R_%I64u", t));
+      double r0 = GlobalVariableCheck(kr) ? GlobalVariableGet(kr) : 0.0;
       if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
         {
          double risk = entry - sl;              // <= 0 once the stop is at/above entry
          if(risk <= 0) continue;
+         if(r0 > 0) risk = r0;
          double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
          if(bid - entry < InpBETriggerR * risk) continue;
          double nsl = NormalizeDouble(entry + InpBEOffsetR * risk, _Digits);
@@ -655,6 +697,7 @@ void ManageBreakEven()
         {
          double risk = sl - entry;
          if(risk <= 0) continue;
+         if(r0 > 0) risk = r0;
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          if(entry - ask < InpBETriggerR * risk) continue;
          double nsl = NormalizeDouble(entry - InpBEOffsetR * risk, _Digits);
@@ -856,6 +899,7 @@ void OnTick()
    if(MyPosition(ticket) != 0 && ticket != g_helperTicket && (clkNow >= g_flatMin || clkNow < g_openMin))
       CloseMine("session flat");
 
+   ManagePartial();
    ManageBreakEven();
 
    datetime bt = iTime(_Symbol, PERIOD_M1, 0);
