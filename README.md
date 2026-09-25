@@ -20,6 +20,7 @@ research code is in `research/`.
 | Robustness | 384 of 384 parameter combinations were profitable on all three independent datasets |
 | Prop simulation (NAS100 + US500, 0.75 % risk per trade, 2005-2019) | +10 % target: 88 % pass, 6 % fail, median 113 days. +8 %: 90 % pass, median 80 days. Phase 2 (+5 %): 93 % pass, median 46 days |
 | Honest caveats | 2026 (Jan-Aug, never used to choose anything) was **flat** (0.0R over 39 trades). The edge is sensitive to execution cost (see below). |
+| Want it in about a week? | Optional **Sprint mode** (off by default): about 1 in 4 attempts pass within 7 days, median 15-20 days to funded if restarts are free, and about 1 in 3 attempts is halted at -8 %. See [Sprint mode](#sprint-mode-trying-to-pass-in-about-a-week-opt-in). |
 
 ![equity](research/results/equity.png)
 
@@ -121,7 +122,10 @@ lowers the Sharpe from 2.2 to 1.9, and ~2 points lowers it to 1.2. Use an accoun
 3. Attach it to a **US100 / NAS100** chart. Any timeframe works; the EA reads M1 data itself. For
    diversification, attach a second copy to a **US500** chart with the **same magic number**, so
    both charts share one account-level guard. Enable Algo Trading.
-4. Check the Experts log and the chart panel. The panel shows *New York time*. If that time is
+4. Optional: load a preset from `mt5/Presets/` (EA properties, Inputs tab, **Load**).
+   `EvalPass_Standard.set` holds the defaults above; the sprint presets are described
+   [below](#sprint-mode-trying-to-pass-in-about-a-week-opt-in).
+5. Check the Experts log and the chart panel. The panel shows *New York time*. If that time is
    wrong, fix the broker-clock inputs (next section).
 
 ### Broker clock (important)
@@ -172,6 +176,81 @@ Risk presets (per trade, per symbol, both charts running):
 * **Standard:** 0.75 %. The default.
 * **Fast:** 1.00 %. About 2-3 months median, but roughly 1 in 7 attempts fails.
 
+## Sprint mode: trying to pass in about a week (opt-in)
+
+The standard settings target steady progress, and that takes months: about 3.5 trades a week, each
+risking 0.75 %. There is no way to reach +10 % in a week from that edge without risking much more
+per trade. Sprint mode does exactly that, as safely as it can be done. It is **off by default**:
+the standard mode above is unchanged.
+
+**What Sprint mode changes (entries, stops and targets stay exactly the same):**
+
+* **Target-based sizing.** Each trade risks `(target - current profit) / 2.5`, capped at 4 % of the
+  initial balance. So one winner at the 2.5R take-profit reaches the target: on a fresh +10 %
+  challenge that is 4 % risk, and it shrinks as you get closer.
+* **Account-wide risk budget (all charts with the same magic number).** A new trade only gets the
+  room left before a worst-case -4 % day or -9.5 % total. That room counts what every open position
+  could still lose down to its stop. Normal stop-outs therefore cannot breach the firm's 5 % daily or
+  10 % total limits; only a price gap through a stop can. When several charts signal at the same
+  check, they take turns through a shared lock, so they cannot all size against the same room.
+* **Stop and restart at -8 %.** The EA halts at -8 % (`InpMaxLossStopPct`). An account that deep
+  would need weeks at tiny size to recover, so a new challenge is the faster route if retries are
+  free or cheap.
+* **More markets = more chances per week.** The same strategy with the same settings (not
+  re-tuned) also works on **US2000** (Russell 2000; 2005-2019: 12 of 15 years profitable) and on
+  **JP225** during the Tokyo session (2010-2019: 8 of 10 years profitable, essentially uncorrelated
+  with the US indices). Both are more sensitive to spread than NAS100/US500.
+* **Minimum-trading-days helper.** Many firms require e.g. 4 trading days. After the target is hit,
+  the EA places one minimum-lot trade per day (closed about a minute later) until the count is
+  reached. With it, a 1-week pass stays possible, because 4 trading days always fit into 7 calendar
+  days. It is off unless `InpMinTradingDays` > 0.
+
+**Simulated results.** Every calendar day is used as a start date; full table in
+[`research/results/sprint.md`](research/results/sprint.md).
+
+| markets running Sprint mode | pass within 7 days | within 14 days | within 30 days | halted at -8 % within 30 days | median days to funded (free restarts) |
+|---|---|---|---|---|---|
+| NAS100 + US500 | 23 % | 31 % | 44 % | 33 % | 20 |
+| NAS100 + US500 + US2000 | 25 % | 35 % | 49 % | 34 % | 17 |
+| NAS100 + US500 + US2000 + JP225 | 27 % | 37 % | 51 % | 35 % | 15 |
+| NAS100 only, recent data (2020-26) | 20 % | 27 % | 37 % | 29 % | 38 |
+| *reference: Standard mode, NAS100 + US500* | *1 %* | *3 %* | *10 %* | *1 %* | *113 (single attempt)* |
+
+**How to read this:**
+
+* **Worth it only if a failed attempt is free or cheap.** About a quarter of attempts pass inside a
+  week, but about a third are halted at -8 % and need a new challenge. On a single paid attempt,
+  Standard mode (88 % pass) is the better bet.
+* **Use the fast lane for the challenge only.** Once funded, go back to `EvalPass_Standard.set` (and
+  `InpTargetPct = 0`). Sprint sizing is a way to pass a challenge, not a way to manage a funded
+  account.
+* **Check your firm's rules first.** Some firms limit risk per trade, or flag "all-in" sizing as
+  gambling.
+
+**Set-up for Sprint mode:**
+
+1. Attach the EA to **US100/NAS100, US500 and US2000** charts with `EvalPass_Sprint_US.set`.
+   Optionally add a **JP225** chart with `EvalPass_Sprint_JP225.set` (Tokyo session inputs).
+   Use the **same magic number everywhere**: the risk budget and the halt are shared across charts.
+2. The presets set `InpTargetPct = 10.2`, a small buffer above a 10 % target so the helper's
+   micro trades cannot drop you below it. They also set `InpMinTradingDays = 4` and
+   `InpDailyStopPct = 4.5`, a last-resort cap below the firm's 5 %. Adjust the target and minimum days
+   to your firm (phase 2: `InpTargetPct = 5.2`).
+3. Set `InpMaxSpreadPoints` for each symbol so no entry is taken when the spread is unusually wide.
+   This matters most on US2000 and JP225.
+
+| sprint input | preset | meaning |
+|---|---|---|
+| `InpSprintMode` | true | switch sizing from fixed % to target-based |
+| `InpSprintMaxRiskPct` | 4.0 | max risk per trade, % of initial balance |
+| `InpSprintMinRiskPct` | 0.25 | skip a trade if less than this fits in the budget |
+| `InpSprintWinR` | 2.5 | size so that one win of this many R reaches the target |
+| `InpSprintDailyBudget` | 4.0 | worst-case daily loss incl. open stops (all charts) |
+| `InpSprintTotalBudget` | 9.5 | worst-case total loss incl. open stops (all charts) |
+| `InpSessionTZ` | New York / Tokyo | session clock (Tokyo for JP225: 09:00-15:00, checks 09:30-14:30) |
+| `InpMinTradingDays` | 4 | minimum-days helper after the target (0 = off) |
+| `InpHelperHHMM` | 1005 / 935 | session time of the helper's micro trade |
+
 ## Prop-firm notes
 
 * **Minimum trading days.** The EA halts as soon as the target is hit. If your firm needs a minimum
@@ -191,6 +270,7 @@ bash research/get_data.sh        # downloads and converts the data (NAS100 ticks
 cd research
 python report.py                 # results/results.md + results/equity.png
 python robust_grid.py            # 384-config robustness grid on 3 datasets
+python sprint_report.py          # results/sprint.md
 ```
 
 | file | role |
@@ -199,6 +279,7 @@ python robust_grid.py            # 384-config robustness grid on 3 datasets
 | `research/strategies.py` | strategy generators (noise-area momentum, ORB, mean reversion, breakout) |
 | `research/ea_replica.py` | independent bar-by-bar copy of the EA logic, used to cross-check the backtest |
 | `research/prop.py` | prop-challenge and account-curve simulation |
+| `research/sprint.py`, `research/sprint_report.py` | Sprint-mode simulation (risk budget, halt and restart) |
 | `research/scan_mr.py`, `research/scan_bo.py` | scalping scans that did not survive |
 
 ## Risk warning

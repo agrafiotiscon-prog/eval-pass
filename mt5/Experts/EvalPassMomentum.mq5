@@ -12,7 +12,7 @@
 //|  noise width, a fixed R target, break-even, flat before 16:00 NY. |
 //+------------------------------------------------------------------+
 #property copyright   "eval-pass"
-#property version     "1.00"
+#property version     "1.10"
 #property description "NY-session intraday momentum for NAS100 / US500 with prop-firm guard"
 
 #include <Trade/Trade.mqh>
@@ -28,6 +28,12 @@ enum ENUM_EXIT_MODE
    EXIT_NONE     = 0, // Stop-loss / take-profit / break-even / session end only
    EXIT_BAND     = 1, // Also close when price is back behind the band (or VWAP)
    EXIT_OPPOSITE = 2  // Also close when price crosses the opposite band
+  };
+
+enum ENUM_SESSION_TZ
+  {
+   TZ_NEW_YORK = 0,  // New York (US index cash session, US daylight saving)
+   TZ_TOKYO    = 1   // Tokyo (JP225 cash session, UTC+9, no daylight saving)
   };
 
 enum ENUM_DST_MODE
@@ -85,6 +91,21 @@ input bool           InpCloseOnGuard     = true;      // Close open trades when 
 input int            InpDayResetHour     = 0;         // Server hour when the prop "day" resets
 input bool           InpResetGuard       = false;     // Clear saved guard state on start (new challenge)
 
+input group "=== Session clock ==="
+input ENUM_SESSION_TZ InpSessionTZ       = TZ_NEW_YORK; // Time zone of the session inputs above
+
+input group "=== Sprint mode (opt-in: faster pass, much higher risk) ==="
+input bool           InpSprintMode        = false;    // Size every trade toward the profit target
+input double         InpSprintMaxRiskPct  = 4.0;      // Max risk per trade, % of initial balance
+input double         InpSprintMinRiskPct  = 0.25;     // Skip a trade if less risk than this fits the budget
+input double         InpSprintWinR        = 2.5;      // Size so one win of this many R reaches the target
+input double         InpSprintDailyBudget = 4.0;      // Worst-case daily loss incl. open stops, % of initial (all charts)
+input double         InpSprintTotalBudget = 9.5;      // Worst-case total loss incl. open stops, % of initial (all charts)
+
+input group "=== Minimum trading days helper (opt-in) ==="
+input int            InpMinTradingDays    = 0;        // After the target is hit, 1 micro trade per day until this many trading days (0 = off)
+input int            InpHelperHHMM        = 1005;     // Session time for the micro trade (HHMM)
+
 input group "=== Misc ==="
 input long           InpMagic           = 26092501;   // Magic number
 input string         InpComment         = "EvalPass"; // Order comment
@@ -110,6 +131,10 @@ long     g_guardDay    = -1;
 double   g_dayStartEq  = 0.0;
 bool     g_haltDay     = false;
 bool     g_haltAll     = false;
+int      g_haltReason  = 0;           // 1 = profit target, 2 = max-loss guard
+datetime g_startTime   = 0;           // challenge start (for trading-day counting)
+ulong    g_helperTicket = 0;
+datetime g_helperOpened = 0;
 string   g_status      = "";
 
 //+------------------------------------------------------------------+
@@ -175,6 +200,15 @@ datetime ServerToUTC(const datetime serverTime) { return serverTime - RuleOffset
 datetime UTCToNY(const datetime utc) { return utc - 5 * 3600 + (IsUSDST(utc) ? 3600 : 0); }
 
 datetime ServerToNY(const datetime serverTime) { return UTCToNY(ServerToUTC(serverTime)); }
+
+// session-local clock used by all session logic (New York by default)
+datetime ServerToSession(const datetime serverTime)
+  {
+   if(InpSessionTZ == TZ_TOKYO) return ServerToUTC(serverTime) + 9 * 3600;
+   return ServerToNY(serverTime);
+  }
+
+string SessionName() { return (InpSessionTZ == TZ_TOKYO) ? "Tokyo" : "NY"; }
 
 long DayId(const datetime t)    { return ((long)t) / 86400; }
 int  MinOfDay(const datetime t) { return (int)((((long)t) % 86400) / 60); }
@@ -251,6 +285,16 @@ void GuardInit()
    if(!MQLInfoInteger(MQL_TESTER))
       GlobalVariableSet(k, g_initBalance);
    g_haltAll = (!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(GVName("halt_all")) && GlobalVariableGet(GVName("halt_all")) > 0);
+   if(g_haltAll)
+      g_haltReason = (int)GlobalVariableGet(GVName("halt_all"));
+   string ks = GVName("start_time");
+   if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(ks))
+      g_startTime = (datetime)GlobalVariableGet(ks);
+   else
+     {
+      g_startTime = TimeCurrent();
+      if(!MQLInfoInteger(MQL_TESTER)) GlobalVariableSet(ks, (double)g_startTime);
+     }
   }
 
 // returns true when new entries are allowed
@@ -278,6 +322,7 @@ bool GuardCheck()
       GlobalVariableGet(GVName("halt_all")) > 0)
      {
       g_haltAll = true;
+      g_haltReason = (int)GlobalVariableGet(GVName("halt_all"));
       CloseMine("halted by another instance");
      }
    if(g_haltAll) return false;
@@ -285,7 +330,8 @@ bool GuardCheck()
    if(InpMaxLossStopPct > 0 && eq <= g_initBalance * (1.0 - InpMaxLossStopPct / 100.0))
      {
       g_haltAll = true;
-      if(!MQLInfoInteger(MQL_TESTER)) GlobalVariableSet(GVName("halt_all"), 1);
+      g_haltReason = 2;
+      if(!MQLInfoInteger(MQL_TESTER)) GlobalVariableSet(GVName("halt_all"), 2);
       PrintFormat("GUARD: max-loss stop hit (equity %.2f). EA halted.", eq);
       if(InpCloseOnGuard) CloseMine("max-loss guard");
       return false;
@@ -293,6 +339,7 @@ bool GuardCheck()
    if(InpTargetPct > 0 && eq >= g_initBalance * (1.0 + InpTargetPct / 100.0))
      {
       g_haltAll = true;
+      g_haltReason = 1;
       if(!MQLInfoInteger(MQL_TESTER)) GlobalVariableSet(GVName("halt_all"), 1);
       PrintFormat("GUARD: profit target reached (equity %.2f). EA halted.", eq);
       CloseMine("profit target");
@@ -330,7 +377,7 @@ bool BuildDay(const long today)
    double todayOpen = 0.0;
    for(int i = 0; i < n; i++)
      {
-      datetime ny = ServerToNY(r[i].time);
+      datetime ny = ServerToSession(r[i].time);
       int m = MinOfDay(ny) - g_openMin;
       if(m < 0 || m >= g_sessLen) continue;
       long d = DayId(ny);
@@ -383,7 +430,7 @@ bool BuildDay(const long today)
    g_dayId     = today;
    g_dayReady  = true;
    // trades already taken today (e.g. after a terminal restart)
-   datetime nyNow = ServerToNY(TimeCurrent());
+   datetime nyNow = ServerToSession(TimeCurrent());
    datetime sessStartServer = TimeCurrent() - (datetime)(((long)nyNow % 86400) - (long)g_openMin * 60);
    g_tradesToday = CountEntriesSince(sessStartServer);
    int k30 = (g_sessLen > 29) ? 29 : g_sessLen - 1;
@@ -402,7 +449,7 @@ double SessionVWAP(const long today)
    double pv = 0.0, v = 0.0;
    for(int i = 0; i < n; i++)
      {
-      datetime ny = ServerToNY(r[i].time);
+      datetime ny = ServerToSession(r[i].time);
       if(DayId(ny) != today) continue;
       int m = MinOfDay(ny) - g_openMin;
       if(m < 0 || m >= g_sessLen) continue;
@@ -416,6 +463,56 @@ double SessionVWAP(const long today)
 //+------------------------------------------------------------------+
 //| Order sizing / entry                                             |
 //+------------------------------------------------------------------+
+// money still at risk on all positions of this EA (every symbol) if every stop is hit from here
+double OpenRiskMoney()
+  {
+   double total = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      string sym = PositionGetString(POSITION_SYMBOL);
+      double sl  = PositionGetDouble(POSITION_SL);
+      if(sl <= 0)
+        {
+         total += AccountInfoDouble(ACCOUNT_BALANCE);   // unknown risk -> no budget left
+         continue;
+        }
+      bool   buy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double pnl = 0.0;
+      if(OrderCalcProfit(buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, sym, PositionGetDouble(POSITION_VOLUME),
+                         PositionGetDouble(POSITION_PRICE_CURRENT), sl, pnl) && pnl < 0)
+         total -= pnl;
+     }
+   return total;
+  }
+
+// money to risk on the next trade
+double RiskMoneyForTrade()
+  {
+   if(!InpSprintMode || InpTargetPct <= 0)
+      return AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
+   // sprint: size so that one win of InpSprintWinR reaches the target ...
+   double init      = g_initBalance;
+   double profitPct = 100.0 * (AccountInfoDouble(ACCOUNT_BALANCE) / init - 1.0);
+   double pct       = (InpTargetPct - profitPct) / InpSprintWinR;
+   pct = MathMax(InpSprintMinRiskPct, MathMin(InpSprintMaxRiskPct, pct));
+   double money = init * pct / 100.0;
+   // ... but never more than the room left before the daily / total budgets,
+   // counting what every open position could still lose down to its stop
+   double worstEq   = AccountInfoDouble(ACCOUNT_EQUITY) - OpenRiskMoney();
+   double dailyRoom = worstEq - (g_dayStartEq - init * InpSprintDailyBudget / 100.0);
+   double totalRoom = worstEq - init * (1.0 - InpSprintTotalBudget / 100.0);
+   money = MathMin(money, MathMin(dailyRoom, totalRoom));
+   if(money < init * InpSprintMinRiskPct / 100.0)
+     {
+      PrintFormat("Sprint: risk budget exhausted (daily room %.2f, total room %.2f) -> skip", dailyRoom, totalRoom);
+      return 0.0;
+     }
+   return money;
+  }
+
 double LotsForRisk(const int dir, const double stopDist)
   {
    double price = (dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -427,7 +524,8 @@ double LotsForRisk(const int dir, const double stopDist)
       Print("LotsForRisk: OrderCalcProfit failed ", GetLastError());
       return 0.0;
      }
-   double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
+   double riskMoney = RiskMoneyForTrade();
+   if(riskMoney <= 0) return 0.0;
    double lots = riskMoney / MathAbs(pnl1);
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -448,7 +546,33 @@ double LotsForRisk(const int dir, const double stopDist)
    return NormalizeDouble(lots, 8);
   }
 
-bool OpenTrade(const int dir, const double stopDist)
+// Sprint mode: charts share one risk budget, so only one chart may size and open a trade at a time
+// (atomic GlobalVariableSetOnCondition; a lock older than 10 s is treated as stale).
+bool AcquireEntryLock()
+  {
+   if(!InpSprintMode || MQLInfoInteger(MQL_TESTER)) return true;
+   string nm = GVName("entry_lock");
+   if(!GlobalVariableCheck(nm)) GlobalVariableSet(nm, 0);
+   for(int i = 0; i < 300; i++)
+     {
+      double cur = GlobalVariableGet(nm);
+      double now = (double)TimeLocal();
+      if((cur == 0 || now - cur > 10) && GlobalVariableSetOnCondition(nm, now, cur)) return true;
+      Sleep(10);
+     }
+   return false;
+  }
+
+void ReleaseEntryLock()
+  {
+   if(!InpSprintMode || MQLInfoInteger(MQL_TESTER)) return;
+   // keep the lock until the new position is visible, so the next chart's budget includes it
+   ulong t;
+   for(int i = 0; i < 50 && MyPosition(t) == 0; i++) Sleep(20);
+   GlobalVariableSet(GVName("entry_lock"), 0);
+  }
+
+bool OpenTradeLocked(const int dir, const double stopDist)
   {
    if(stopDist <= 0) return false;
    long spreadPts = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
@@ -485,6 +609,18 @@ bool OpenTrade(const int dir, const double stopDist)
      }
    PrintFormat("%s %.2f lots, stop distance %.2f", dir > 0 ? "BUY" : "SELL", lots, dist);
    return true;
+  }
+
+bool OpenTrade(const int dir, const double stopDist)
+  {
+   if(!AcquireEntryLock())
+     {
+      Print("Sprint: entry lock busy -> skip");
+      return false;
+     }
+   bool done = OpenTradeLocked(dir, stopDist);
+   ReleaseEntryLock();
+   return done;
   }
 
 //+------------------------------------------------------------------+
@@ -529,13 +665,90 @@ void ManageBreakEven()
   }
 
 //+------------------------------------------------------------------+
+//| Minimum-trading-days helper (opt-in)                             |
+//| Prop firms count a day when at least one trade is opened. Once    |
+//| the target is reached the EA halts; if the firm still needs more  |
+//| trading days, open one minimum-lot trade per day and close it     |
+//| about a minute later (cost: roughly one spread on the min lot).   |
+//+------------------------------------------------------------------+
+int TradingDaysSinceStart(bool &todayTraded)
+  {
+   todayTraded = false;
+   if(!HistorySelect(g_startTime, TimeCurrent() + 60)) return 0;
+   long today = DayId(TimeCurrent() - InpDayResetHour * 3600);
+   long days[];
+   int  nd = 0;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+     {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0) continue;
+      long type = HistoryDealGetInteger(d, DEAL_TYPE);
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL) continue;
+      if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+      long day = DayId((datetime)HistoryDealGetInteger(d, DEAL_TIME) - InpDayResetHour * 3600);
+      if(day == today) todayTraded = true;
+      bool seen = false;
+      for(int j = 0; j < nd; j++)
+         if(days[j] == day) { seen = true; break; }
+      if(!seen)
+        {
+         ArrayResize(days, nd + 1);
+         days[nd] = day;
+         nd++;
+        }
+     }
+   return nd;
+  }
+
+void MinDaysHelper()
+  {
+   if(InpMinTradingDays <= 0 || !g_haltAll || g_haltReason != 1) return;
+   if(g_helperTicket != 0)
+     {
+      if(PositionSelectByTicket(g_helperTicket))
+        {
+         if(TimeCurrent() - g_helperOpened >= 60 && !g_trade.PositionClose(g_helperTicket))
+            PrintFormat("Helper close failed: %d %s", g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+         return;
+        }
+      g_helperTicket = 0;
+     }
+   int clk = MinOfDay(ServerToSession(TimeCurrent()));
+   if(clk < HHMMtoMin(InpHelperHHMM) || clk >= g_flatMin) return;
+   long pday = DayId(TimeCurrent() - InpDayResetHour * 3600);
+   string lock = GVName(StringFormat("helper_%I64d", pday));
+   if(GlobalVariableCheck(lock)) return;             // already handled today (this or another chart)
+   GlobalVariableSet(lock, 1);
+   bool todayTraded = false;
+   int nd = TradingDaysSinceStart(todayTraded);
+   if(nd >= InpMinTradingDays || todayTraded) return;
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tick <= 0) tick = _Point;
+   double ask  = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double sl   = NormalizeDouble(MathRound(ask * 0.99 / tick) * tick, _Digits);
+   if(!g_trade.Buy(vmin, _Symbol, 0.0, sl, 0.0, InpComment + " day"))
+     {
+      PrintFormat("Helper trade failed: %d %s", g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+      return;
+     }
+   ulong t;
+   if(MyPosition(t) != 0)
+     {
+      g_helperTicket = t;
+      g_helperOpened = TimeCurrent();
+     }
+   PrintFormat("Minimum-days helper: micro trade opened (trading day %d of %d)", nd + 1, InpMinTradingDays);
+  }
+
+//+------------------------------------------------------------------+
 //| Signal evaluation on the bar that just closed                    |
 //+------------------------------------------------------------------+
 void OnNewBar(const bool entriesAllowed)
   {
    MqlRates b[];
    if(CopyRates(_Symbol, PERIOD_M1, 1, 1, b) != 1) return;
-   datetime ny = ServerToNY(b[0].time);
+   datetime ny = ServerToSession(b[0].time);
    long today = DayId(ny);
    int  clk   = MinOfDay(ny);
    int  m     = clk - g_openMin;
@@ -569,8 +782,8 @@ void OnNewBar(const bool entriesAllowed)
    if(pos < 0 && exitShort) { CloseMine("signal exit"); closedNow = true; }
    if(closedNow) pos = 0;
 
-   g_status = StringFormat("NY %s  close %.2f  upper %.2f  lower %.2f  vwap %.2f  sigma %.3f%%",
-                           TimeToString(ny + 60, TIME_MINUTES), c, upper, lower, vwap, 100.0 * sig);
+   g_status = StringFormat("%s %s  close %.2f  upper %.2f  lower %.2f  vwap %.2f  sigma %.3f%%",
+                           SessionName(), TimeToString(ny + 60, TIME_MINUTES), c, upper, lower, vwap, 100.0 * sig);
 
    if(pos != 0 || closedNow || !entriesAllowed) return;
    if(clk + 1 > g_lastEntry) return;
@@ -620,9 +833,12 @@ int OnInit()
         }
      }
    GuardInit();
-   PrintFormat("EvalPassMomentum on %s: server %s = New York %s (check this matches reality!)",
-               _Symbol, TimeToString(TimeTradeServer(), TIME_DATE | TIME_MINUTES),
-               TimeToString(ServerToNY(TimeTradeServer()), TIME_DATE | TIME_MINUTES));
+   PrintFormat("EvalPassMomentum on %s: server %s = %s %s (check this matches reality!)",
+               _Symbol, TimeToString(TimeTradeServer(), TIME_DATE | TIME_MINUTES), SessionName(),
+               TimeToString(ServerToSession(TimeTradeServer()), TIME_DATE | TIME_MINUTES));
+   if(InpSprintMode)
+      PrintFormat("SPRINT MODE: up to %.2f%% risk per trade (target %.1f%%, budgets %.1f%% daily / %.1f%% total)",
+                  InpSprintMaxRiskPct, InpTargetPct, InpSprintDailyBudget, InpSprintTotalBudget);
    return INIT_SUCCEEDED;
   }
 
@@ -631,12 +847,13 @@ void OnDeinit(const int reason) { Comment(""); }
 void OnTick()
   {
    bool entriesAllowed = GuardCheck();
+   MinDaysHelper();
 
    // hard flat before the close
-   datetime nyNow = ServerToNY(TimeCurrent());
+   datetime nyNow = ServerToSession(TimeCurrent());
    int clkNow = MinOfDay(nyNow);
    ulong ticket;
-   if(MyPosition(ticket) != 0 && (clkNow >= g_flatMin || clkNow < g_openMin))
+   if(MyPosition(ticket) != 0 && ticket != g_helperTicket && (clkNow >= g_flatMin || clkNow < g_openMin))
       CloseMine("session flat");
 
    ManageBreakEven();
@@ -651,8 +868,8 @@ void OnTick()
    if(InpShowPanel && !MQLInfoInteger(MQL_OPTIMIZATION))
      {
       double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-      Comment(StringFormat("EvalPassMomentum  |  NY time %s\n%s\nTrades today %d/%d  |  Equity %.2f  (%.2f%% vs initial, %.2f%% today)\n%s",
-                           TimeToString(nyNow, TIME_DATE | TIME_MINUTES), g_status, g_tradesToday, InpMaxTradesPerDay,
+      Comment(StringFormat("EvalPassMomentum%s  |  %s time %s\n%s\nTrades today %d/%d  |  Equity %.2f  (%.2f%% vs initial, %.2f%% today)\n%s",
+                           InpSprintMode ? " [SPRINT]" : "", SessionName(), TimeToString(nyNow, TIME_DATE | TIME_MINUTES), g_status, g_tradesToday, InpMaxTradesPerDay,
                            eq, 100.0 * (eq / g_initBalance - 1.0), 100.0 * (eq - g_dayStartEq) / g_initBalance,
                            g_haltAll ? "HALTED (target reached or max-loss guard)" : (g_haltDay ? "Daily stop active - no new trades today" : "Active")));
      }

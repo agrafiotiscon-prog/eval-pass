@@ -23,9 +23,12 @@ fetch USA-100-Technical-Index USATECHIDXUSD
 if [ ! -d "$D/financial-data" ]; then
   git clone -q --filter=blob:none --no-checkout --depth 1 https://github.com/FutureSharks/financial-data "$D/financial-data"
   (cd "$D/financial-data" && git sparse-checkout init --no-cone && \
-   git sparse-checkout set 'pyfinancialdata/data/currencies/oanda/NAS100_USD/' 'pyfinancialdata/data/currencies/oanda/SPX500_USD/' && \
+   git sparse-checkout set 'pyfinancialdata/data/currencies/oanda/NAS100_USD/' 'pyfinancialdata/data/currencies/oanda/SPX500_USD/' \
+     'pyfinancialdata/data/currencies/oanda/US2000_USD/' 'pyfinancialdata/data/currencies/oanda/JP225_USD/' && \
    git checkout -q HEAD)
 fi
 O="$D/financial-data/pyfinancialdata/data/currencies/oanda"
 python3 "$HERE/oanda_prep.py" "$O/NAS100_USD" NAS100O "$D/m1o" 1.0
 python3 "$HERE/oanda_prep.py" "$O/SPX500_USD" SPX500O "$D/m1o" 1.0
+python3 "$HERE/oanda_prep.py" "$O/US2000_USD" US2000O "$D/m1o" 1.0     # sprint-mode markets
+python3 "$HERE/oanda_prep.py" "$O/JP225_USD" JP225O "$D/m1o" 1.0

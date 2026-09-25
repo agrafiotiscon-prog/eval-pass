@@ -167,14 +167,12 @@ def breakout(mkt: Market, n=20, sl_atr=1.5, tp_r=0.0, atr_n=20, clock="utc_min",
     return it
 
 
-_NOISE_CACHE = {}
-
-
 def noise_prep(mkt: Market, lookback=14, clock="ny_min", open_min=570, close_min=960) -> dict:
-    """Per-bar session open, previous close, noise width sigma and session VWAP (cached)."""
-    key = (id(mkt), lookback, clock, open_min, close_min)
-    if key in _NOISE_CACHE:
-        return _NOISE_CACHE[key]
+    """Per-bar session open, previous close, noise width sigma and session VWAP (cached on the market)."""
+    cache = mkt.__dict__.setdefault("_noise_cache", {})
+    key = (lookback, clock, open_min, close_min)
+    if key in cache:
+        return cache[key]
     s = mkt.sig
     clk = s[clock].values
     date = s.ny_date.values if clock == "ny_min" else s.day.values
@@ -202,7 +200,7 @@ def noise_prep(mkt: Market, lookback=14, clock="ny_min", open_min=570, close_min
     cum_v = pd.Series(w).groupby(date).cumsum().values
     vwap = np.where(cum_v > 0, cum_pv / np.maximum(cum_v, 1e-9), np.nan)
     out = dict(clk=clk, rth=rth, o=o, pc=pc, sigma=sigma, vwap=vwap, c=s.bc.values)
-    _NOISE_CACHE[key] = out
+    cache[key] = out
     return out
 
 
