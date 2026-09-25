@@ -21,6 +21,7 @@ research code is in `research/`.
 | Prop simulation (NAS100 + US500, 0.75 % risk per trade, 2005-2019) | +10 % target: 88 % pass, 6 % fail, median 113 days. +8 %: 90 % pass, median 80 days. Phase 2 (+5 %): 93 % pass, median 46 days |
 | Honest caveats | 2026 (Jan-Aug, never used to choose anything) was **flat** (0.0R over 39 trades). The edge is sensitive to execution cost (see below). |
 | Per-market strategies (v1.30) | Indices trade **momentum**; **gold (XAUUSD) trades multi-day swing trend** (`InpStrategy = Swing`). Gold's daily correlation with index momentum is 0.00. With 2025-26 start dates at 1 % risk, NDX100 + gold passes about 81 % of the time vs about 2 % for NDX100 alone. |
+| **Recommended sizing (v1.40)** | **Cushion sizing**: risk = 0.15 x (balance above the -8 % halt level), max 2 %. It is as fast as fixed 1 % risk, passes as often as fixed 0.5-0.75 %, and halts about half as often. See [Cushion sizing](#cushion-sizing-recommended-v140). |
 | Want it in about a week? | Optional **Sprint mode** (off by default): about 1 in 4 attempts pass within 7 days, median 15-20 days to funded if restarts are free, and about 1 in 3 attempts is halted at -8 %. See [Sprint mode](#sprint-mode-trying-to-pass-in-about-a-week-opt-in). |
 
 ![equity](research/results/equity.png)
@@ -314,6 +315,51 @@ estimated 0.022R per night of swap. Check your broker's gold swap rates.
 so the account guard is shared. Index charts are unchanged; for JP225 at 0.75 % use
 `EvalPass_Standard_JP225.set`.
 
+## Cushion sizing (recommended, v1.40)
+
+A prop challenge has fixed loss limits, so *how much* to risk matters as much as *what* to trade. I
+compared several sizing policies on the combined index-momentum + gold-swing trades: fixed %,
+step-up after profits, halving risk in drawdowns, cushion-based sizing and Sprint. The full tables
+are in [`research/results/sizing.md`](research/results/sizing.md).
+
+**How cushion sizing works:**
+- The cushion is the distance between your balance and the EA's -8 % halt level. At the start it is
+  8 %, so the first trades risk 0.15 x 8 % = **1.2 %**.
+- After a profit the cushion grows and so does the risk, up to the 2 % cap.
+- Near the halt level the risk shrinks automatically (at -4 % it is 0.6 %), so a losing streak can
+  hardly reach the limit.
+- The account-wide 4 % daily / 9.5 % total worst-case budget and the cross-chart lock stay active.
+
+| one attempt | policy | pass <= 120 days | pass eventually | halted | median days |
+|---|---|---|---|---|---|
+| 3 indices + gold, 2010-19 | fixed 0.75 % | 69 % | 86 % | 10 % | 65 |
+| | fixed 1.0 % | 74 % | 79 % | 14 % | 42 |
+| | **cushion** | 69 % | 86 % | **5 %** | **38** |
+| NDX100 + gold, 2020-26 | fixed 0.75 % | 27 % | 90 % | 3 % | 189 |
+| | fixed 1.0 % | 46 % | 82 % | 6 % | 111 |
+| | **cushion** | **52 %** | **97 %** | **0 %** | 111 |
+| NDX100 + gold, starts 2025-26 | fixed 1.0 % | 52 % | 81 % | 3 % | 101 |
+| | **cushion** | **64 %** | **87 %** | **0 %** | **80** |
+
+Also tested and rejected:
+- **Capping total open risk:** lower pass rates, halts unchanged.
+- **More risk on gold than on each index:** more halts.
+- **The gold trend rules on 25 other markets:** oil, gas, grains, sugar, bonds, 8 FX pairs and 7
+  indices. Only oil, sugar and EURJPY were mildly positive, and there is no recent data for them.
+  Gold is unique.
+
+**Set-up:**
+
+| chart | preset |
+|---|---|
+| NDX100 and SPX500 | `EvalPass_Cushion.set` |
+| JP225 | `EvalPass_Cushion_JP225.set` |
+| XAUUSD | `EvalPass_Gold_Swing_Cushion.set` |
+
+On every chart, set `InpChallengeBalance` to your account size (e.g. 100000) and use the same magic
+number. The presets set the daily stop to 4.5 % (a last-resort cap under the firm's 5 %) and the
+target to 10.2 %.
+
 ## Prop-firm notes
 
 * **Minimum trading days.** The EA halts as soon as the target is hit. If your firm needs a minimum
@@ -343,6 +389,8 @@ python sprint_report.py          # results/sprint.md
 | `research/ea_replica.py` | independent bar-by-bar copy of the EA logic, used to cross-check the backtest |
 | `research/prop.py` | prop-challenge and account-curve simulation |
 | `research/wf.py`, `research/wf_report.py`, `research/fam_summary.py` | strategy library, walk-forward selection, per-family robustness |
+| `research/sizing.py`, `research/sizing_report.py` | sizing policies (fixed, cushion, step-up, drawdown cut, sprint) -> `results/sizing.md` |
+| `research/swing_scan.py` | gold swing rules tested unchanged on 25 other markets |
 | `research/portfolio_report.py` | per-market results + portfolio challenge simulation (`results/portfolio.md`) |
 | `research/sprint.py`, `research/sprint_report.py` | Sprint-mode simulation (risk budget, halt and restart) |
 | `research/scan_mr.py`, `research/scan_bo.py` | scalping scans that did not survive |

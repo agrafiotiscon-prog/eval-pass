@@ -12,7 +12,7 @@
 //|  noise width, a fixed R target, break-even, flat before 16:00 NY. |
 //+------------------------------------------------------------------+
 #property copyright   "eval-pass"
-#property version     "1.30"
+#property version     "1.40"
 #property description "Index intraday momentum (NDX100/SPX500/JP225) + gold swing trend, with prop-firm guard"
 
 #include <Trade/Trade.mqh>
@@ -122,6 +122,11 @@ input double         InpSprintMinRiskPct  = 0.25;     // Skip a trade if less ri
 input double         InpSprintWinR        = 2.5;      // Size so one win of this many R reaches the target
 input double         InpSprintDailyBudget = 4.0;      // Worst-case daily loss incl. open stops, % of initial (all charts)
 input double         InpSprintTotalBudget = 9.5;      // Worst-case total loss incl. open stops, % of initial (all charts)
+
+input group "=== Cushion sizing (opt-in, recommended for challenges) ==="
+input bool           InpCushionSizing     = false;    // Risk a share of the cushion above the max-loss halt level
+input double         InpCushionMult       = 0.15;     // Risk per trade = this x (balance - halt level), % of initial
+input double         InpCushionMaxRiskPct = 2.0;      // Cap on risk per trade, % of initial balance
 
 input group "=== Minimum trading days helper (opt-in) ==="
 input int            InpMinTradingDays    = 0;        // After the target is hit, 1 micro trade per day until this many trading days (0 = off)
@@ -512,13 +517,24 @@ double OpenRiskMoney()
 // money to risk on the next trade
 double RiskMoneyForTrade()
   {
-   if(!InpSprintMode || InpTargetPct <= 0)
+   bool cushion = InpCushionSizing && InpMaxLossStopPct > 0 && !InpSprintMode;
+   if(!cushion && (!InpSprintMode || InpTargetPct <= 0))
       return AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
-   // sprint: size so that one win of InpSprintWinR reaches the target ...
    double init      = g_initBalance;
    double profitPct = 100.0 * (AccountInfoDouble(ACCOUNT_BALANCE) / init - 1.0);
-   double pct       = (InpTargetPct - profitPct) / InpSprintWinR;
-   pct = MathMax(InpSprintMinRiskPct, MathMin(InpSprintMaxRiskPct, pct));
+   double pct;
+   if(cushion)
+     {
+      // cushion: a fixed share of the distance between the balance and the max-loss halt level
+      double cushionPct = profitPct + InpMaxLossStopPct;
+      pct = MathMax(InpSprintMinRiskPct, MathMin(InpCushionMaxRiskPct, InpCushionMult * cushionPct));
+     }
+   else
+     {
+      // sprint: size so that one win of InpSprintWinR reaches the target
+      pct = (InpTargetPct - profitPct) / InpSprintWinR;
+      pct = MathMax(InpSprintMinRiskPct, MathMin(InpSprintMaxRiskPct, pct));
+     }
    double money = init * pct / 100.0;
    // ... but never more than the room left before the daily / total budgets,
    // counting what every open position could still lose down to its stop
@@ -571,7 +587,7 @@ double LotsForRisk(const int dir, const double stopDist)
 // (atomic GlobalVariableSetOnCondition; a lock older than 10 s is treated as stale).
 bool AcquireEntryLock()
   {
-   if(!InpSprintMode || MQLInfoInteger(MQL_TESTER)) return true;
+   if(!(InpSprintMode || InpCushionSizing) || MQLInfoInteger(MQL_TESTER)) return true;
    string nm = GVName("entry_lock");
    if(!GlobalVariableCheck(nm)) GlobalVariableSet(nm, 0);
    for(int i = 0; i < 300; i++)
@@ -586,7 +602,7 @@ bool AcquireEntryLock()
 
 void ReleaseEntryLock()
   {
-   if(!InpSprintMode || MQLInfoInteger(MQL_TESTER)) return;
+   if(!(InpSprintMode || InpCushionSizing) || MQLInfoInteger(MQL_TESTER)) return;
    // keep the lock until the new position is visible, so the next chart's budget includes it
    ulong t;
    for(int i = 0; i < 50 && MyPosition(t) == 0; i++) Sleep(20);
@@ -1036,6 +1052,9 @@ int OnInit()
    PrintFormat("EvalPassMomentum on %s: server %s = %s %s (check this matches reality!)",
                _Symbol, TimeToString(TimeTradeServer(), TIME_DATE | TIME_MINUTES), SessionName(),
                TimeToString(ServerToSession(TimeTradeServer()), TIME_DATE | TIME_MINUTES));
+   if(InpCushionSizing && !InpSprintMode)
+      PrintFormat("CUSHION SIZING: risk %.2f x (balance - %.1f%% halt level), max %.2f%% per trade",
+                  InpCushionMult, InpMaxLossStopPct, InpCushionMaxRiskPct);
    if(InpSprintMode)
       PrintFormat("SPRINT MODE: up to %.2f%% risk per trade (target %.1f%%, budgets %.1f%% daily / %.1f%% total)",
                   InpSprintMaxRiskPct, InpTargetPct, InpSprintDailyBudget, InpSprintTotalBudget);
